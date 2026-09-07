@@ -1,14 +1,18 @@
-﻿from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from app.adapters.web.routers.webhooks import router as webhooks_router
+
 from app.adapters.persistence.models import Base
-from app.core.database import engine
+from app.adapters.web.routers.webhooks import router as webhooks_router
+from app.core import database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    async with engine.begin() as conn:
+    # The engine is resolved through the module (not imported by value) so that
+    # tests can substitute ``database.engine`` before the app starts up.
+    async with database.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
 

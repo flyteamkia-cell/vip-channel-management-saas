@@ -1,16 +1,12 @@
-﻿from uuid import uuid4
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.main import create_app
 
-client = TestClient(create_app())
-
-
-def test_e2e_payment_webhook_lifecycle():
+def test_e2e_payment_webhook_lifecycle(client: TestClient) -> None:
     tenant_id = str(uuid4())
     user_id = str(uuid4())
-    
+
     # 1. Verification of open public route (Health Check)
     health_res = client.get("/health")
     assert health_res.status_code == 200
