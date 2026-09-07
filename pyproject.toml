@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vip-channel-management-saas"
+version = "0.1.0"
+dependencies = [
+    "fastapi",
+    "pydantic",
+    "uvicorn",
+    "sqlalchemy>=2.0.0",
+    "asyncpg",
+    "alembic",
+    "psycopg2-binary"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+explicit_package_bases = true
+ignore_missing_imports = true
+files = ["app", "tests"]
