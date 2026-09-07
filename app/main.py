@@ -6,7 +6,10 @@ from fastapi import FastAPI
 from app.adapters.web.middlewares.tenant_context import TenantContextMiddleware
 from app.adapters.web.routers.health import router as health_router
 from app.adapters.web.routers.webhooks import router as webhooks_router
-from app.core import database
+
+# tenant_scope is imported for its side effect: it registers the ORM events
+# that scope every session to its tenant.
+from app.core import database, tenant_scope  # noqa: F401
 
 
 @asynccontextmanager

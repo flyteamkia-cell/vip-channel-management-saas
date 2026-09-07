@@ -29,6 +29,8 @@ param(
     [string]$User = "postgres",
     [string]$Password = $env:PGPASSWORD,
     [string]$Database = "vip_test",
+    [string]$AppUser = "vip_app",
+    [string]$AppPassword = "vip",
     [switch]$UnitOnly,
     [switch]$UseDocker
 )
@@ -50,6 +52,7 @@ try {
         }
         docker compose -f docker-compose.test.yml up -d
         $PgHost = "localhost"; $Port = 5433; $User = "vip"; $Password = "vip"
+        $AppUser = "vip_app"; $AppPassword = "vip"
         Write-Host "Waiting for the container to accept connections..." -ForegroundColor Cyan
         Start-Sleep -Seconds 5
     }
@@ -77,21 +80,46 @@ try {
     }
     $env:PGPASSWORD = $Password
 
-    # ---- create the test database if it is missing -------------------------
-    $exists = & $psql -h $PgHost -p $Port -U $User -d postgres -tAc `
-        "SELECT 1 FROM pg_database WHERE datname = '$Database'"
+    # ---- provision role and database ---------------------------------------
+    # The suite connects as an ORDINARY role, never as the admin one.
+    # PostgreSQL exempts superusers and BYPASSRLS roles from row policies, so a
+    # run as `postgres` would skip every row-level-security assertion.
+    $probe = & $psql -h $PgHost -p $Port -U $User -d postgres -tAc "SELECT 1"
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not reach PostgreSQL at ${PgHost}:${Port} as '$User'. Check that the service is running and the password is correct."
+        Write-Host "Could not reach PostgreSQL at ${PgHost}:${Port} as '$User'." -ForegroundColor Red
+        Write-Host "Check that the service is running and the password is correct." -ForegroundColor Red
+        exit 1
     }
-    if ($exists -ne "1") {
-        Write-Host "Creating database '$Database'..." -ForegroundColor Cyan
-        & $psql -h $PgHost -p $Port -U $User -d postgres -c "CREATE DATABASE $Database" | Out-Null
+
+    $roleExists = & $psql -h $PgHost -p $Port -U $User -d postgres -tAc `
+        "SELECT 1 FROM pg_roles WHERE rolname = '$AppUser'"
+    if ($roleExists -ne "1") {
+        Write-Host "Creating role '$AppUser' (NOSUPERUSER, NOBYPASSRLS)..." -ForegroundColor Cyan
+        & $psql -h $PgHost -p $Port -U $User -d postgres -c `
+            "CREATE ROLE $AppUser WITH LOGIN PASSWORD '$AppPassword' NOSUPERUSER NOBYPASSRLS" | Out-Null
+    }
+
+    # If the database exists but belongs to someone else, its TABLES do too, and
+    # $AppUser could not run migrations on them. A test database is disposable,
+    # so recreate it rather than trying to reassign ownership object by object.
+    $owner = & $psql -h $PgHost -p $Port -U $User -d postgres -tAc `
+        "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = '$Database'"
+    if ($owner -and $owner.Trim() -ne $AppUser) {
+        Write-Host "Database '$Database' is owned by '$($owner.Trim())'; recreating it for '$AppUser'." -ForegroundColor Yellow
+        & $psql -h $PgHost -p $Port -U $User -d postgres -c `
+            "DROP DATABASE $Database WITH (FORCE)" | Out-Null
+        $owner = $null
+    }
+    if (-not $owner) {
+        Write-Host "Creating database '$Database' owned by '$AppUser'..." -ForegroundColor Cyan
+        & $psql -h $PgHost -p $Port -U $User -d postgres -c `
+            "CREATE DATABASE $Database OWNER $AppUser" | Out-Null
     }
 
     # ---- run ---------------------------------------------------------------
-    $escaped = [uri]::EscapeDataString($Password)
-    $env:TEST_DATABASE_URL = "postgresql+asyncpg://${User}:${escaped}@${PgHost}:${Port}/${Database}"
-    Write-Host "TEST_DATABASE_URL -> postgresql+asyncpg://${User}:***@${PgHost}:${Port}/${Database}" -ForegroundColor DarkGray
+    $escaped = [uri]::EscapeDataString($AppPassword)
+    $env:TEST_DATABASE_URL = "postgresql+asyncpg://${AppUser}:${escaped}@${PgHost}:${Port}/${Database}"
+    Write-Host "TEST_DATABASE_URL -> postgresql+asyncpg://${AppUser}:***@${PgHost}:${Port}/${Database}" -ForegroundColor DarkGray
 
     python -m pytest
     exit $LASTEXITCODE

@@ -4,7 +4,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.core.database import get_db_session
+from app.adapters.web.dependencies import get_tenant_session
 
 WEBHOOK_URL = "/api/v1/webhooks/payments"
 
@@ -83,7 +83,7 @@ def test_rejected_request_never_opens_a_database_session(app_instance: FastAPI) 
         opened += 1
         yield None
 
-    app_instance.dependency_overrides[get_db_session] = counting_session
+    app_instance.dependency_overrides[get_tenant_session] = counting_session
 
     with TestClient(app_instance) as test_client:
         assert test_client.post(WEBHOOK_URL, json=_valid_payload()).status_code == 401

@@ -42,9 +42,10 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import AsyncGenerator, Generator, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from alembic import command
@@ -62,7 +63,7 @@ from sqlalchemy.pool import NullPool
 
 from app.adapters.persistence.models import Base
 from app.core import database as db_module
-from app.core.database import get_db_session
+from app.core.tenant_scope import bind_tenant
 from app.main import create_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -189,13 +190,65 @@ async def clean_tables(backend: Backend) -> AsyncGenerator[None, None]:
     """Leave the database empty for the next test.
 
     The web layer commits, so rolling a transaction back is not enough here.
-    Deleting in reverse dependency order keeps this correct once foreign keys
-    are added.
+
+    On PostgreSQL this must be TRUNCATE, not DELETE: row-level security is
+    forced on the tenant-scoped tables, and a DELETE issued with no tenant
+    published matches no rows and quietly cleans nothing. TRUNCATE is a
+    table-level operation and is not subject to row policies.
     """
     yield
+    tables = list(reversed(Base.metadata.sorted_tables))
     async with backend.engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(text(f'DELETE FROM "{table.name}"'))
+        if conn.dialect.name == "postgresql":
+            names = ", ".join(f'"{t.name}"' for t in tables)
+            await conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+        else:
+            for table in tables:
+                await conn.execute(text(f'DELETE FROM "{table.name}"'))
+
+
+@pytest.fixture
+async def rls_enforced(backend: Backend) -> bool:
+    """Whether the connection is actually subject to row-level security.
+
+    PostgreSQL exempts superusers and BYPASSRLS roles from row policies, so a
+    suite run as `postgres` would pass the isolation tests without ever
+    evaluating one. Tests that assert on RLS skip loudly rather than pass
+    vacuously.
+    """
+    if backend.engine.dialect.name != "postgresql":
+        pytest.skip("row-level security is a PostgreSQL feature")
+    async with backend.engine.connect() as conn:
+        row = await conn.execute(
+            text(
+                "SELECT rolsuper OR rolbypassrls FROM pg_roles "
+                "WHERE rolname = current_user"
+            )
+        )
+        if row.scalar():
+            pytest.skip(
+                "connected as a superuser or BYPASSRLS role, which PostgreSQL "
+                "exempts from row policies -- run as an ordinary role to "
+                "exercise row-level security"
+            )
+    return True
+
+
+@pytest.fixture
+def tenant_session(backend: Backend):
+    """Factory for sessions scoped to a given tenant.
+
+    Mirrors production: one session belongs to one tenant for its lifetime,
+    which is what makes the RLS setting and the loader criteria meaningful.
+    """
+
+    @asynccontextmanager
+    async def _factory(tenant_id: UUID) -> AsyncGenerator[AsyncSession, None]:
+        async with backend.session_factory() as session:
+            bind_tenant(session, tenant_id)
+            yield session
+
+    return _factory
 
 
 # --------------------------------------------------------------------------- #
@@ -203,24 +256,15 @@ async def clean_tables(backend: Backend) -> AsyncGenerator[None, None]:
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def app_instance(backend: Backend) -> Generator[FastAPI, None, None]:
-    async def override_get_db_session() -> AsyncGenerator[AsyncSession, None]:
-        async with backend.session_factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    # Also redirect the module-level engine/factory: anything resolving them
-    # lazily (the lifespan handler, the real get_db_session) must never reach
-    # the developer's own database during a test run.
+    # get_tenant_session resolves the factory through the module, so redirecting
+    # it here is the whole wiring: no dependency override, and nothing that
+    # resolves the engine lazily (the lifespan handler, get_db_session) can
+    # reach the developer's own database during a test run.
     original_engine, original_factory = db_module.engine, db_module.AsyncSessionFactory
     db_module.engine = backend.engine
     db_module.AsyncSessionFactory = backend.session_factory
 
     application = create_app()
-    application.dependency_overrides[get_db_session] = override_get_db_session
     yield application
     application.dependency_overrides.clear()
 
@@ -236,6 +280,10 @@ def client(app_instance: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture
 async def async_session(backend: Backend) -> AsyncGenerator[AsyncSession, None]:
-    """Direct database session for repository-level tests."""
+    """Unscoped session -- no tenant bound.
+
+    Useful for asserting what an unscoped caller can see, which under RLS is
+    nothing. Tests that act on behalf of a tenant should use ``tenant_session``.
+    """
     async with backend.session_factory() as session:
         yield session

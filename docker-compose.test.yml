@@ -1,7 +1,7 @@
 # Disposable PostgreSQL for the integration/e2e layers.
 #
 #   docker compose -f docker-compose.test.yml up -d
-#   export TEST_DATABASE_URL="postgresql+asyncpg://vip:vip@localhost:5433/vip_test"
+#   export TEST_DATABASE_URL="postgresql+asyncpg://vip_app:vip@localhost:5433/vip_test"
 #   pytest
 #
 # Port 5433 keeps this out of the way of any PostgreSQL already listening on
@@ -11,7 +11,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: vip
+      # An ordinary role, deliberately not a superuser: PostgreSQL exempts
+      # superusers from row policies, so the RLS tests would skip.
+      POSTGRES_USER: vip_app
       POSTGRES_PASSWORD: vip
       POSTGRES_DB: vip_test
     ports:
@@ -19,7 +21,7 @@ services:
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vip -d vip_test"]
+      test: ["CMD-SHELL", "pg_isready -U vip_app -d vip_test"]
       interval: 2s
       timeout: 3s
       retries: 15

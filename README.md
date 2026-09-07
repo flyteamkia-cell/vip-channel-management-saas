@@ -31,6 +31,33 @@ alembic revision --autogenerate -m "describe the change"
 alembic downgrade -1          # roll back one revision
 ```
 
+## Tenant isolation
+
+Scoping is enforced in two independent layers, both keyed off the tenant bound
+to the **Session** at the single place a session is created
+(`get_tenant_session`):
+
+1. **`with_loader_criteria`** appends `tenant_id = :tenant` to every ORM SELECT,
+   including relationship loads. Queries are scoped whether or not the author
+   remembered a `WHERE` clause.
+2. **PostgreSQL row-level security** (migration `0002`) applies the same
+   predicate inside the database, so it still holds when the ORM is bypassed —
+   raw SQL, a Core `delete()`, a hand-written report. It fails closed: with no
+   tenant published, `current_setting` returns NULL, the policy matches nothing,
+   and a read returns zero rows rather than every row.
+
+A `ContextVar` was considered and rejected. It removes the `tenant_id`
+parameter but puts no predicate into the SQL, so it solves ergonomics rather
+than safety — and it turns a signature that *cannot* be called without a tenant
+into ambient state that is simply absent in every path with no HTTP request
+behind it (a worker, a CLI script, a data migration).
+
+> **The application must connect as an ordinary role.** PostgreSQL exempts
+> superusers and `BYPASSRLS` roles from row policies. The test suite detects
+> this and *skips* the RLS assertions with a loud reason rather than passing
+> vacuously; `scripts/run-tests.ps1` provisions a `vip_app` role for exactly
+> this reason.
+
 ## Request pipeline
 
 ```
@@ -86,7 +113,7 @@ No PostgreSQL installed yet? `winget install -e --id PostgreSQL.PostgreSQL.16`
 By hand, if you prefer (note: PowerShell uses `$env:`, not `export`):
 
 ```powershell
-$env:TEST_DATABASE_URL = "postgresql+asyncpg://postgres:<pgpass>@localhost:5432/vip_test"
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://vip_app:vip@localhost:5432/vip_test"
 pytest
 ```
 
@@ -98,7 +125,7 @@ pytest -m "not postgres"
 
 # full suite
 docker compose -f docker-compose.test.yml up -d
-export TEST_DATABASE_URL="postgresql+asyncpg://vip:vip@localhost:5433/vip_test"
+export TEST_DATABASE_URL="postgresql+asyncpg://vip_app:vip@localhost:5433/vip_test"
 pytest
 ```
 
