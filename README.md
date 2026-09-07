@@ -6,9 +6,17 @@ Multi-tenant payment webhook ingestion service. FastAPI + SQLAlchemy 2.0 (async)
 ## Setup
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
 cp .env.example .env
+```
+
+PowerShell:
+
+```powershell
+python -m venv .venv; .\.venv\Scripts\Activate.ps1
+pip install -e ".[test]"
+Copy-Item .env.example .env
 ```
 
 ## Database
@@ -62,6 +70,28 @@ Two backends, chosen by layer:
 Schema in **both** cases is built with `alembic upgrade head`, so drift between
 the models and the migrations fails the test suite instead of the next deploy.
 
+### Windows (PowerShell)
+
+A helper script finds a locally installed PostgreSQL, creates the test database
+if it is missing, and runs the suite. Docker is optional.
+
+```powershell
+.\scripts\run-tests.ps1 -UnitOnly            # no database needed
+.\scripts\run-tests.ps1 -Password <pgpass>   # local PostgreSQL on :5432
+.\scripts\run-tests.ps1 -UseDocker           # docker-compose on :5433
+```
+
+No PostgreSQL installed yet? `winget install -e --id PostgreSQL.PostgreSQL.16`
+
+By hand, if you prefer (note: PowerShell uses `$env:`, not `export`):
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://postgres:<pgpass>@localhost:5432/vip_test"
+pytest
+```
+
+### macOS / Linux
+
 ```bash
 # unit layer only — no database needed
 pytest -m "not postgres"
@@ -85,5 +115,6 @@ app/
   core/                   database wiring, logging
   services/               application services
 migrations/               Alembic revisions
+scripts/run-tests.ps1     Windows test runner (finds PostgreSQL, creates the test DB)
 tests/{unit,integration,e2e}/
 ```
