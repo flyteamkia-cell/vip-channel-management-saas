@@ -1,27 +1,11 @@
-﻿from decimal import Decimal
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.persistence.models import Base, PaymentRecordTable
+from app.adapters.persistence.models import PaymentRecordTable
 from app.adapters.persistence.repositories import SQLAlchemyPaymentRepository
-
-# Use SQLite in-memory or PostgreSQL for local integration runner
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-
-@pytest.fixture
-async def async_session():
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-
-    await engine.dispose()
 
 
 @pytest.mark.asyncio

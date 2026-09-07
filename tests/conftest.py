@@ -1,38 +1,63 @@
 """Shared pytest fixtures for the whole suite.
 
-Design notes
-------------
-1. Every test module builds its *own* FastAPI instance through ``create_app()``.
-   A dependency override installed on ``app.main.app`` at import time therefore
-   never reaches those instances. Overrides are installed per-instance in the
-   ``client`` fixture below, which is the only place that knows about the app
-   under test.
+Test database strategy
+----------------------
+Two backends, chosen by the layer under test:
 
-2. ``TestClient`` must be entered as a context manager. Starlette only runs the
-   ``lifespan`` handler between ``__enter__`` and ``__exit__``; a bare
-   ``TestClient(app)`` skips startup entirely, so any schema bootstrap that
-   lives in ``lifespan`` silently never happens.
+* ``tests/unit`` runs on a throwaway **SQLite** file — no external service, so
+  the fast feedback loop stays fast.
+* ``tests/integration`` and ``tests/e2e`` run on **PostgreSQL**, because that is
+  what production uses. SQLite silently accepts things Postgres rejects (native
+  ``uuid``/``numeric``/``timestamptz`` semantics, transaction and locking
+  behaviour, index rules), so an e2e test on SQLite is really testing a
+  different application. The marker is applied automatically by directory in
+  ``pytest_collection_modifyitems`` below; ``@pytest.mark.postgres`` can also be
+  set by hand.
 
-3. The test database is a *file-backed* SQLite DB in a temp directory rather
-   than ``:memory:``. ``TestClient`` drives the ASGI app on its own event loop
-   while async fixtures run on pytest-asyncio's loop. An in-memory SQLite
-   database only exists inside a single connection, so sharing it across loops
-   needs ``StaticPool`` tricks that break the moment a second loop touches the
-   connection. A file is visible to every connection on every loop for free,
-   and it disappears with the temp directory at the end of the session.
+Point ``TEST_DATABASE_URL`` at a disposable database, e.g.::
+
+    docker compose -f docker-compose.test.yml up -d
+    export TEST_DATABASE_URL="postgresql+asyncpg://vip:vip@localhost:5433/vip_test"
+    pytest
+
+Without that variable the Postgres-backed tests are **skipped** rather than
+quietly downgraded to SQLite. Set ``TEST_REQUIRE_POSTGRES=1`` (do this in CI) to
+turn that skip into a hard failure, so the layer can never silently stop running.
+
+Schema is always built by ``alembic upgrade head`` — never ``create_all``. Any
+drift between the models and the migrations therefore shows up as a failing
+test instead of surfacing on the first production deploy.
+
+Two mechanics worth remembering
+-------------------------------
+1. Every test module builds its own FastAPI instance via ``create_app()``, so a
+   dependency override installed on ``app.main.app`` at import time never
+   reaches it. Overrides are installed per-instance in the ``client`` fixture.
+2. ``TestClient`` must be entered as a context manager; Starlette only runs the
+   ``lifespan`` handler between ``__enter__`` and ``__exit__``.
 """
 
 from __future__ import annotations
 
-import asyncio
+import os
 import tempfile
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from app.adapters.persistence.models import Base
@@ -40,63 +65,177 @@ from app.core import database as db_module
 from app.core.database import get_db_session
 from app.main import create_app
 
-_TMP_DIR = tempfile.TemporaryDirectory(prefix="vip-saas-tests-", ignore_cleanup_errors=True)
-_DB_FILE = Path(_TMP_DIR.name) / "test.db"
-TEST_DATABASE_URL = f"sqlite+aiosqlite:///{_DB_FILE.as_posix()}"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+POSTGRES_URL_ENV = "TEST_DATABASE_URL"
+REQUIRE_POSTGRES_ENV = "TEST_REQUIRE_POSTGRES"
 
-test_engine = create_async_engine(
-    TEST_DATABASE_URL,
-    echo=False,
-    future=True,
-    poolclass=NullPool,  # no connection is held across event loops
-)
-TestingSessionFactory = async_sessionmaker(
-    test_engine, expire_on_commit=False, class_=AsyncSession
+_POSTGRES_MISSING = (
+    f"{POSTGRES_URL_ENV} is not set — integration/e2e tests need a real "
+    "PostgreSQL database. Start one with "
+    "`docker compose -f docker-compose.test.yml up -d` and export the URL."
 )
 
-# Redirect the production engine/session factory at the test database so that
-# anything resolving them lazily through the module (the lifespan handler, the
-# real ``get_db_session``) can never touch ./test.db during a test run.
-db_module.engine = test_engine
-db_module.AsyncSessionFactory = TestingSessionFactory
+
+# --------------------------------------------------------------------------- #
+# collection: pick the backend by layer
+# --------------------------------------------------------------------------- #
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "postgres: test requires a real PostgreSQL database"
+    )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def database_schema() -> Generator[None, None, None]:
-    """Create every table declared on ``Base`` once per test session."""
-
-    async def _create() -> None:
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(_create())
-    yield
-    asyncio.run(test_engine.dispose())
-    _TMP_DIR.cleanup()
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        parts = Path(str(item.path)).parts
+        if "integration" in parts or "e2e" in parts:
+            item.add_marker(pytest.mark.postgres)
 
 
-async def override_get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Test replacement for ``app.core.database.get_db_session``."""
-    async with TestingSessionFactory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+# --------------------------------------------------------------------------- #
+# schema: always via Alembic
+# --------------------------------------------------------------------------- #
+@contextmanager
+def _database_url(url: str) -> Iterator[None]:
+    """Expose `url` to migrations/env.py, then restore the previous value."""
+    previous = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = url
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous
+
+
+def _alembic_config() -> Config:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    return config
+
+
+def migrate(url: str, revision: str = "head") -> None:
+    with _database_url(url):
+        command.upgrade(_alembic_config(), revision)
+
+
+def unmigrate(url: str) -> None:
+    with _database_url(url):
+        command.downgrade(_alembic_config(), "base")
+
+
+# --------------------------------------------------------------------------- #
+# backends
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Backend:
+    url: str
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+
+
+def _make_backend(url: str) -> Backend:
+    # NullPool: no connection is ever held across event loops. TestClient runs
+    # the ASGI app on its own loop while async fixtures run on pytest-asyncio's,
+    # and a pooled asyncpg/aiosqlite connection bound to a dead loop is the
+    # classic "attached to a different loop" failure.
+    engine = create_async_engine(url, echo=False, future=True, poolclass=NullPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    return Backend(url=url, engine=engine, session_factory=factory)
+
+
+@pytest.fixture(scope="session")
+def sqlite_backend() -> Generator[Backend, None, None]:
+    with tempfile.TemporaryDirectory(
+        prefix="vip-saas-tests-", ignore_cleanup_errors=True
+    ) as tmp_dir:
+        db_file = Path(tmp_dir) / "test.db"
+        url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+        migrate(url)
+        backend = _make_backend(url)
+        yield backend
+        backend.engine.sync_engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def postgres_backend() -> Generator[Backend, None, None]:
+    url = os.getenv(POSTGRES_URL_ENV)
+    if not url:
+        if os.getenv(REQUIRE_POSTGRES_ENV) == "1":
+            pytest.fail(_POSTGRES_MISSING, pytrace=False)
+        pytest.skip(_POSTGRES_MISSING, allow_module_level=True)
+
+    # Start from a known-empty schema so a leftover database from a previous
+    # run cannot make a broken migration look healthy.
+    unmigrate(url)
+    migrate(url)
+    backend = _make_backend(url)
+    yield backend
+    backend.engine.sync_engine.dispose()
+    unmigrate(url)
 
 
 @pytest.fixture
-def app_instance() -> Generator[FastAPI, None, None]:
-    """A fresh FastAPI app wired to the test database."""
+def backend(request: pytest.FixtureRequest) -> Backend:
+    """The database this test should run against."""
+    if request.node.get_closest_marker("postgres"):
+        return request.getfixturevalue("postgres_backend")
+    return request.getfixturevalue("sqlite_backend")
+
+
+@pytest.fixture(autouse=True)
+async def clean_tables(backend: Backend) -> AsyncGenerator[None, None]:
+    """Leave the database empty for the next test.
+
+    The web layer commits, so rolling a transaction back is not enough here.
+    Deleting in reverse dependency order keeps this correct once foreign keys
+    are added.
+    """
+    yield
+    async with backend.engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            await conn.execute(text(f'DELETE FROM "{table.name}"'))
+
+
+# --------------------------------------------------------------------------- #
+# application wiring
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def app_instance(backend: Backend) -> Generator[FastAPI, None, None]:
+    async def override_get_db_session() -> AsyncGenerator[AsyncSession, None]:
+        async with backend.session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    # Also redirect the module-level engine/factory: anything resolving them
+    # lazily (the lifespan handler, the real get_db_session) must never reach
+    # the developer's own database during a test run.
+    original_engine, original_factory = db_module.engine, db_module.AsyncSessionFactory
+    db_module.engine = backend.engine
+    db_module.AsyncSessionFactory = backend.session_factory
+
     application = create_app()
     application.dependency_overrides[get_db_session] = override_get_db_session
     yield application
     application.dependency_overrides.clear()
 
+    db_module.engine, db_module.AsyncSessionFactory = original_engine, original_factory
+
 
 @pytest.fixture
 def client(app_instance: FastAPI) -> Generator[TestClient, None, None]:
-    """HTTP client bound to the test app, with lifespan actually executed."""
+    """HTTP client bound to the test database, with lifespan actually executed."""
     with TestClient(app_instance) as test_client:
         yield test_client
+
+
+@pytest.fixture
+async def async_session(backend: Backend) -> AsyncGenerator[AsyncSession, None]:
+    """Direct database session for repository-level tests."""
+    async with backend.session_factory() as session:
+        yield session
