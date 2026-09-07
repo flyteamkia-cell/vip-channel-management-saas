@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.adapters.web.middlewares.tenant_context import TenantContextMiddleware
+from app.adapters.web.routers.health import router as health_router
 from app.adapters.web.routers.webhooks import router as webhooks_router
 from app.core import database
 
@@ -30,12 +32,14 @@ def create_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # Tenant resolution happens once, before routing. Handlers read the result
+    # from request.state via the get_tenant_id dependency.
+    application.add_middleware(TenantContextMiddleware)
+
+    application.include_router(health_router)
     # اضافه کردن پیشوند /api/v1
     application.include_router(webhooks_router, prefix="/api/v1")
-
-    @application.get("/health")
-    async def health_check() -> dict[str, str]:
-        return {"status": "ok"}
 
     return application
 

@@ -1,14 +1,35 @@
-﻿from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from uuid import UUID
 
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
+
+#: Routes served without a tenant context.
+DEFAULT_PUBLIC_PATHS: frozenset[str] = frozenset(
+    {"/health", "/docs", "/redoc", "/openapi.json"}
+)
 
 
 class TenantContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        if request.url.path in ["/health", "/docs", "/openapi.json", "/redoc"]:
+    """Resolve and validate the tenant for every non-public request.
+
+    This runs before routing, which is the point: an unauthenticated request is
+    rejected before FastAPI validates the body, before dependencies resolve and
+    before a database session is ever opened. Handlers downstream can therefore
+    treat ``request.state.tenant_id`` as a guaranteed, already-validated UUID
+    instead of re-deriving it — one place decides who the caller is.
+    """
+
+    def __init__(self, app: ASGIApp, public_paths: Iterable[str] | None = None) -> None:
+        super().__init__(app)
+        self.public_paths = frozenset(public_paths) if public_paths else DEFAULT_PUBLIC_PATHS
+
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if request.url.path in self.public_paths:
             return await call_next(request)
 
         tenant_header = request.headers.get("X-Tenant-ID")
