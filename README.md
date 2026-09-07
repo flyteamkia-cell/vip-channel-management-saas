@@ -110,6 +110,40 @@ if it is missing, and runs the suite. Docker is optional.
 
 No PostgreSQL installed yet? `winget install -e --id PostgreSQL.PostgreSQL.16`
 
+The admin password is asked for **once**, to create the `vip_app` role and the
+test database. Every later run connects straight as `vip_app`.
+
+### Changing the test role's password
+
+```powershell
+# interactive: psql prompts, so the password is never in your shell history
+psql -U postgres -d postgres -c "\password vip_app"
+
+# then tell the runner about it (add it to your PowerShell profile to persist)
+$env:VIP_TEST_DB_PASSWORD = "<the new password>"
+.\scripts\run-tests.ps1
+```
+
+If the role's stored password and `VIP_TEST_DB_PASSWORD` disagree, the runner
+falls back to the admin account once and resets the role to match.
+
+### Resetting the PostgreSQL admin password
+
+Locked out of `postgres`? In an **Administrator** PowerShell:
+
+```powershell
+$hba = "C:\Program Files\PostgreSQL\16\data\pg_hba.conf"
+Copy-Item $hba "$hba.bak"
+(Get-Content $hba) -replace 'scram-sha-256|md5', 'trust' | Set-Content $hba
+Restart-Service postgresql-x64-16
+
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -U postgres -c "\password postgres"
+
+# Put it back. `trust` means any local process can connect as any role.
+Copy-Item "$hba.bak" $hba -Force
+Restart-Service postgresql-x64-16
+```
+
 By hand, if you prefer (note: PowerShell uses `$env:`, not `export`):
 
 ```powershell

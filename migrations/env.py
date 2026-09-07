@@ -18,7 +18,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.persistence.models import Base
 from app.core.database import get_database_url
@@ -28,8 +28,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_database_url())
-
+# The URL is deliberately NOT written into the Alembic config. alembic.ini is
+# parsed by configparser, whose interpolation treats "%" as an escape, so a URL
+# carrying a percent-encoded password (any password with a character that needs
+# encoding -- "!" becomes %21, and "%" itself) would raise
+# "invalid interpolation syntax" before a single migration ran. Passing the URL
+# straight to the engine keeps configparser out of the path entirely.
 target_metadata = Base.metadata
 
 
@@ -48,7 +52,7 @@ def _configure(connection: Connection) -> None:
 def run_migrations_offline() -> None:
     """Emit SQL to stdout without a DBAPI connection."""
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=get_database_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -66,11 +70,7 @@ def _do_run_migrations(connection: Connection) -> None:
 
 async def run_migrations_online() -> None:
     """Run migrations against a live async connection."""
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_async_engine(get_database_url(), poolclass=pool.NullPool)
     async with connectable.connect() as connection:
         await connection.run_sync(_do_run_migrations)
     await connectable.dispose()
