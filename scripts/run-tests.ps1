@@ -52,6 +52,29 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
+function Invoke-Psql {
+    <#
+      Every psql call goes through here.
+
+      $ErrorActionPreference = "Stop" is right for cmdlets but wrong for native
+      executables: PowerShell turns anything a native command writes to stderr
+      into an error record, and under "Stop" that TERMINATES the script. A probe
+      that is *expected* to fail -- "can this role log in yet?" -- would kill the
+      run instead of returning false. So stderr is discarded here and success is
+      judged by the exit code, which is what actually carries the answer.
+    #>
+    param([string]$Psql, [string[]]$PsqlArgs)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $stdout = & $Psql @PsqlArgs 2>$null
+        $script:PsqlOk = ($LASTEXITCODE -eq 0)
+        if ($null -eq $stdout) { return "" }
+        return ($stdout | Out-String).Trim()
+    }
+    finally { $ErrorActionPreference = $previous }
+}
+
 function Find-Psql {
     $found = (Get-Command psql -ErrorAction SilentlyContinue).Source
     if ($found) { return $found }
@@ -64,50 +87,55 @@ function Find-Psql {
 function Test-AppLogin {
     param([string]$Psql)
     $env:PGPASSWORD = $AppPassword
-    & $Psql -h $PgHost -p $Port -U $AppUser -d $Database -tAc "SELECT 1" 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    # PostgreSQL reports "password authentication failed" for a role that does
+    # not exist as well as for a wrong password, so this one probe answers
+    # "is the app role usable?" without asking which of the two it is.
+    Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $AppUser, "-d", $Database, "-tAc", "SELECT 1") | Out-Null
+    return $script:PsqlOk
 }
 
 function Invoke-Provisioning {
     param([string]$Psql, [string]$AdminPassword)
 
     $env:PGPASSWORD = $AdminPassword
-    & $Psql -h $PgHost -p $Port -U $User -d postgres -tAc "SELECT 1" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $User, "-d", "postgres", "-tAc", "SELECT 1") | Out-Null
+    if (-not $script:PsqlOk) {
         Write-Host "Could not reach PostgreSQL at ${PgHost}:${Port} as '$User'." -ForegroundColor Red
         Write-Host "Check that the service is running and the password is correct." -ForegroundColor Red
         Write-Host "Locked out? See 'Resetting the PostgreSQL password' in README.md." -ForegroundColor Red
         exit 1
     }
 
-    $roleExists = & $Psql -h $PgHost -p $Port -U $User -d postgres -tAc `
-        "SELECT 1 FROM pg_roles WHERE rolname = '$AppUser'"
+    $roleExists = Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $User,
+        "-d", "postgres", "-tAc", "SELECT 1 FROM pg_roles WHERE rolname = '$AppUser'")
     if ($roleExists -ne "1") {
         Write-Host "Creating role '$AppUser' (NOSUPERUSER, NOBYPASSRLS)..." -ForegroundColor Cyan
-        & $Psql -h $PgHost -p $Port -U $User -d postgres -c `
-            "CREATE ROLE $AppUser WITH LOGIN PASSWORD '$AppPassword' NOSUPERUSER NOBYPASSRLS" | Out-Null
+        Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $User, "-d", "postgres",
+            "-c", "CREATE ROLE $AppUser WITH LOGIN PASSWORD '$AppPassword' NOSUPERUSER NOBYPASSRLS") | Out-Null
     }
     else {
         # The role exists but could not log in, so the stored password differs
         # from the one this run was given. Make them agree.
         Write-Host "Updating the password for existing role '$AppUser'..." -ForegroundColor Cyan
-        & $Psql -h $PgHost -p $Port -U $User -d postgres -c `
-            "ALTER ROLE $AppUser WITH PASSWORD '$AppPassword'" | Out-Null
+        Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $User, "-d", "postgres",
+            "-c", "ALTER ROLE $AppUser WITH PASSWORD '$AppPassword'") | Out-Null
     }
 
     # If the database exists but belongs to someone else, its TABLES do too, and
     # $AppUser could not run migrations on them. A test database is disposable,
     # so recreate it rather than reassigning ownership object by object.
-    $owner = & $Psql -h $PgHost -p $Port -U $User -d postgres -tAc `
-        "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = '$Database'"
+    $owner = Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $User, "-d", "postgres",
+        "-tAc", "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = '$Database'")
     if ($owner -and $owner.Trim() -ne $AppUser) {
         Write-Host "Database '$Database' is owned by '$($owner.Trim())'; recreating it for '$AppUser'." -ForegroundColor Yellow
-        & $Psql -h $PgHost -p $Port -U $User -d postgres -c "DROP DATABASE $Database WITH (FORCE)" | Out-Null
+        Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $User, "-d", "postgres",
+            "-c", "DROP DATABASE $Database WITH (FORCE)") | Out-Null
         $owner = $null
     }
     if (-not $owner) {
         Write-Host "Creating database '$Database' owned by '$AppUser'..." -ForegroundColor Cyan
-        & $Psql -h $PgHost -p $Port -U $User -d postgres -c "CREATE DATABASE $Database OWNER $AppUser" | Out-Null
+        Invoke-Psql -Psql $Psql -PsqlArgs @("-h", $PgHost, "-p", $Port, "-U", $User, "-d", "postgres",
+            "-c", "CREATE DATABASE $Database OWNER $AppUser") | Out-Null
     }
 }
 
