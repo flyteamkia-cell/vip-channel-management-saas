@@ -13,6 +13,7 @@ from app.adapters.persistence.models.base import (
     TimestampedEntity,
     utcnow,
 )
+from app.adapters.persistence.models.jobs import JobExecution
 from app.adapters.persistence.models.membership import (
     ReferralAccount,
     Subscription,
@@ -31,6 +32,7 @@ from app.adapters.persistence.models.tenant import (
 
 __all__ = [
     "Base",
+    "JobExecution",
     "PaymentRecordTable",
     "ProviderCredential",
     "ReferralAccount",

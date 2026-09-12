@@ -84,3 +84,11 @@ class ProviderType(StrEnum):
     BITUNIX = "BITUNIX"
     EPLANET = "EPLANET"
     TELEGRAM = "TELEGRAM"
+
+
+class JobRunState(StrEnum):
+    """PHASE0 §32 — the lifecycle of one claimed scheduled run."""
+
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
