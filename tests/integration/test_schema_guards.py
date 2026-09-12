@@ -59,18 +59,21 @@ async def test_every_tenant_scoped_table_has_a_forced_row_policy(
 
 
 @pytest.mark.asyncio
-async def test_tenants_table_is_not_row_scoped(
-    async_session: AsyncSession, rls_enforced: bool
+@pytest.mark.parametrize("table", ["tenants", "webhook_routes"])
+async def test_registry_tables_are_not_row_scoped(
+    async_session: AsyncSession, rls_enforced: bool, table: str
 ) -> None:
-    """The tenant registry must stay reachable without a tenant context.
+    """Both must stay reachable without a tenant context.
 
-    A row policy on `tenants` keyed to the current tenant would make creating
-    the very first tenant impossible: the WITH CHECK cannot pass before the
-    tenant exists. Guarding it here so nobody 'fixes' the apparent omission.
+    `tenants` because the first insert has no tenant to satisfy a WITH CHECK
+    against; `webhook_routes` because Telegram calls with no idea which
+    customer its bot belongs to, so the tenant is resolved FROM this table —
+    a policy here would make every webhook 404. Guarded so nobody 'fixes' the
+    apparent omission.
     """
     enabled = (
         await async_session.execute(
-            text("SELECT relrowsecurity FROM pg_class WHERE relname = 'tenants'")
+            text("SELECT relrowsecurity FROM pg_class WHERE relname = :t").bindparams(t=table)
         )
     ).scalar()
     assert enabled is False

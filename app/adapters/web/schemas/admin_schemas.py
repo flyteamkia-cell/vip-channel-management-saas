@@ -91,6 +91,10 @@ class BotConfigResponse(BaseModel):
     bot_username: str | None
     token_last_four: str | None
     verified_at: datetime | None
+    #: Where the tenant should point Telegram's setWebhook. The token in it is
+    #: the only thing authenticating that caller, so it is returned once here
+    #: and never logged.
+    webhook_path: str | None = None
 
 
 class IntegrationCheckResponse(BaseModel):

@@ -16,9 +16,11 @@ Two rules hold across every route here:
 
 from __future__ import annotations
 
+import secrets
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.persistence.models import (
@@ -26,6 +28,7 @@ from app.adapters.persistence.models import (
     ReferralProgramConfig,
     TelegramBotConfig,
     TelegramChannel,
+    WebhookRoute,
     utcnow,
 )
 from app.adapters.persistence.repositories import (
@@ -92,6 +95,31 @@ async def _store_secret(
             last_four=last_four(secret),
         ),
     )
+
+
+async def _ensure_webhook_route(session: AsyncSession, tenant_id: UUID) -> str:
+    """One stable, unguessable path per tenant.
+
+    Stable because rotating it would silently break the bot until someone ran
+    setWebhook again; unguessable because the path IS the authentication for a
+    caller that cannot send a header. 32 bytes of urlsafe randomness.
+    """
+    existing = (
+        await session.execute(
+            select(WebhookRoute).where(
+                WebhookRoute.tenant_id == tenant_id, WebhookRoute.provider == "TELEGRAM"
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing.token
+
+    route = WebhookRoute(
+        tenant_id=tenant_id, token=secrets.token_urlsafe(32)[:64], provider="TELEGRAM"
+    )
+    session.add(route)
+    await session.flush()
+    return route.token
 
 
 @router.put("/credentials", response_model=CredentialResponse)
@@ -231,6 +259,7 @@ async def upsert_bot(
             tenant_id, TelegramBotConfig(tenant_id=tenant_id, credential_id=credential.id)
         )
     config.credential_id = credential.id
+    webhook_token = await _ensure_webhook_route(session, tenant_id)
 
     try:
         identity = await (await ProviderFactory(session).telegram(tenant_id)).get_me()
@@ -247,6 +276,7 @@ async def upsert_bot(
         bot_username=config.bot_username,
         token_last_four=credential.last_four,
         verified_at=config.verified_at,
+        webhook_path=f"/api/v1/telegram/{webhook_token}",
     )
 
 

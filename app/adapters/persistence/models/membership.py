@@ -41,6 +41,13 @@ class TelegramUser(TenantScoped, TimestampedEntity, Base):
     )
 
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: Which market the user picked before being asked for a UID. The chat is
+    #: the only place that choice exists, and Telegram gives us no session, so
+    #: it is kept here rather than in memory: a redeploy between the button and
+    #: the UID must not lose it.
+    pending_market: Mapped[Market | None] = mapped_column(
+        Enum(Market, native_enum=False, length=16), nullable=True
+    )
     username: Mapped[str | None] = mapped_column(String(100), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     language_code: Mapped[str | None] = mapped_column(String(16), nullable=True)

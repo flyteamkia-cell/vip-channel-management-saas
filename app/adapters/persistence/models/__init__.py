@@ -22,6 +22,7 @@ from app.adapters.persistence.models.membership import (
     VIPMembership,
 )
 from app.adapters.persistence.models.payment import PaymentRecordTable
+from app.adapters.persistence.models.routing import WebhookRoute
 from app.adapters.persistence.models.tenant import (
     ProviderCredential,
     ReferralProgramConfig,
@@ -46,5 +47,6 @@ __all__ = [
     "TimestampedEntity",
     "TradingActivitySnapshot",
     "VIPMembership",
+    "WebhookRoute",
     "utcnow",
 ]

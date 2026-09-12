@@ -6,6 +6,8 @@ from fastapi import FastAPI
 from app.adapters.web.middlewares.tenant_context import TenantContextMiddleware
 from app.adapters.web.routers.admin import router as admin_router
 from app.adapters.web.routers.health import router as health_router
+from app.adapters.web.routers.telegram_webhook import WEBHOOK_PATH_PREFIX
+from app.adapters.web.routers.telegram_webhook import router as telegram_router
 from app.adapters.web.routers.webhooks import router as webhooks_router
 
 # tenant_scope is imported for its side effect: it registers the ORM events
@@ -39,12 +41,15 @@ def create_app() -> FastAPI:
 
     # Tenant resolution happens once, before routing. Handlers read the result
     # from request.state via the get_tenant_id dependency.
-    application.add_middleware(TenantContextMiddleware)
+    application.add_middleware(
+        TenantContextMiddleware, public_prefixes=(WEBHOOK_PATH_PREFIX,)
+    )
 
     application.include_router(health_router)
     # اضافه کردن پیشوند /api/v1
     application.include_router(webhooks_router, prefix="/api/v1")
     application.include_router(admin_router, prefix="/api/v1")
+    application.include_router(telegram_router, prefix="/api/v1")
 
     return application
 

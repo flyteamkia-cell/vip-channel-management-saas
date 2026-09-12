@@ -22,14 +22,25 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
     instead of re-deriving it — one place decides who the caller is.
     """
 
-    def __init__(self, app: ASGIApp, public_paths: Iterable[str] | None = None) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        public_paths: Iterable[str] | None = None,
+        public_prefixes: Iterable[str] | None = None,
+    ) -> None:
         super().__init__(app)
         self.public_paths = frozenset(public_paths) if public_paths else DEFAULT_PUBLIC_PATHS
+        # Prefixes exist for callers that cannot send a header at all -- the
+        # Telegram webhook identifies its tenant by an unguessable path token,
+        # because Telegram has no idea which of our customers it is calling
+        # about. Such a route authenticates itself; it is not unprotected.
+        self.public_prefixes = tuple(public_prefixes or ())
 
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.url.path in self.public_paths:
+        path = request.url.path
+        if path in self.public_paths or path.startswith(self.public_prefixes):
             return await call_next(request)
 
         tenant_header = request.headers.get("X-Tenant-ID")
