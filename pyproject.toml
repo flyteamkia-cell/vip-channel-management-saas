@@ -14,6 +14,7 @@ dependencies = [
     "alembic",
     "httpx",        # provider adapters
     "cryptography", # credential encryption at rest (PHASE0 §2)
+    "apscheduler",  # in-process scheduling (PHASE0 §31)
 ]
 
 [project.optional-dependencies]

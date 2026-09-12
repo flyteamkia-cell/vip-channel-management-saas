@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.adapters.web.middlewares.tenant_context import TenantContextMiddleware
+from app.adapters.web.routers.admin import router as admin_router
 from app.adapters.web.routers.health import router as health_router
 from app.adapters.web.routers.webhooks import router as webhooks_router
 
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     application.include_router(health_router)
     # اضافه کردن پیشوند /api/v1
     application.include_router(webhooks_router, prefix="/api/v1")
+    application.include_router(admin_router, prefix="/api/v1")
 
     return application
 
