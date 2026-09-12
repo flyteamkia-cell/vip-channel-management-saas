@@ -12,7 +12,8 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "asyncpg",
     "alembic",
-    "psycopg2-binary"
+    "httpx",        # provider adapters
+    "cryptography", # credential encryption at rest (PHASE0 §2)
 ]
 
 [project.optional-dependencies]
